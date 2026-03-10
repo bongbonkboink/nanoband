@@ -5,8 +5,7 @@ package.domain = org.nanoband
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 0.1
-requirements = python3,kivy==2.2.1,rns,lxmf,pillow,plyer
-p4a.branch = stable
+requirements = python3,kivy==2.3.0,rns,lxmf,pillow,plyer
 orientation = portrait
 fullscreen = 0
 android.permissions = BLUETOOTH,BLUETOOTH_ADMIN,BLUETOOTH_CONNECT,BLUETOOTH_SCAN,INTERNET,CAMERA
