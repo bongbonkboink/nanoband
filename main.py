@@ -98,11 +98,17 @@ def connect_rnode(rnode_name, rnode_mac):
             return None, "RNode not found in paired devices"
 
         adapter.cancelDiscovery()
-        socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+        # Try reflection method first (more reliable on Android 10+)
+        try:
+            Method = autoclass('java.lang.reflect.Method')
+            m = device.getClass().getMethod(
+                "createRfcommSocket", [autoclass('java.lang.Integer').TYPE])
+            socket = m.invoke(device, [1])
+            print("[BT] Using reflection socket on channel 1")
+        except Exception as re:
+            print("[BT] Reflection failed, trying standard: " + str(re))
+            socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
         socket.connect()
-        print("[BT] Connected to " + str(device.getName()))
-        return socket, "OK"
-
     except Exception as e:
         msg = str(e)
         print("[BT] connect error: " + msg)
