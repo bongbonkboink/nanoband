@@ -548,8 +548,8 @@ class NanobandApp(App):
         super().__init__(**kw)
         self.core = NanobandCore()
         self.settings = {
-            "rnode_name":     "Rnode 7AEB7",
-            "rnode_mac":      "F0:24:F9:8D:AF:66",
+            "rnode_name":     "Rnode 1BFD",
+            "rnode_mac":      "F0:24:F9:B4:FB:6E",
             "freq":           "868.125",
             "bw":             "125",
             "sf":             "9",
