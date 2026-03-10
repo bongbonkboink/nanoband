@@ -5,10 +5,10 @@ package.domain = org.nanoband
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 0.1
-requirements = python3,kivy==2.3.0,rns,lxmf,pillow,plyer
+requirements = python3,kivy==2.3.0,rns,lxmf,pillow,plyer,able_recipe
 orientation = portrait
 fullscreen = 0
-android.permissions = BLUETOOTH,BLUETOOTH_ADMIN,BLUETOOTH_CONNECT,BLUETOOTH_SCAN,INTERNET,CAMERA
+android.permissions = BLUETOOTH,BLUETOOTH_ADMIN,BLUETOOTH_CONNECT,BLUETOOTH_SCAN,BLUETOOTH_ADVERTISE,ACCESS_FINE_LOCATION,INTERNET,CAMERA
 android.api = 33
 android.minapi = 26
 android.ndk = 25b
