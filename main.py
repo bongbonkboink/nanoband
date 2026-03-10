@@ -26,7 +26,7 @@ MUTED   = hex("556070")
 TEXT    = hex("d4dce8")
 DANGER  = hex("e05050")
 
-# ── RNS / LXMF ──────────────────────────────────────────────────────────────
+#  RNS / LXMF 
 try:
     import RNS
     import LXMF
@@ -34,7 +34,7 @@ try:
 except ImportError:
     RNS_AVAILABLE = False
 
-# ── Android BT ──────────────────────────────────────────────────────────────
+#  Android BT 
 try:
     from jnius import autoclass
     from android.permissions import request_permissions, Permission
@@ -65,27 +65,14 @@ def get_paired_rnode(rnode_name):
         print(f"[BT] get_paired_rnode error: {e}")
         return None
 
-def connect_rnode_bt(device, mac=None):
-    if not ANDROID_AVAILABLE:
+
+def connect_rnode_bt(device):
+    if not ANDROID_AVAILABLE or device is None:
         return None
     try:
-        BluetoothAdapter = autoclass('android.bluetooth.BluetoothAdapter')
         UUID = autoclass('java.util.UUID')
         SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
-
-        # If no device found by name, try direct MAC connect
-        if device is None and mac:
-            print(f"[BT] Trying direct MAC connect: {mac}")
-            adapter = BluetoothAdapter.getDefaultAdapter()
-            device = adapter.getRemoteDevice(mac)
-
-        if device is None:
-            print("[BT] No device available")
-            return None
-
         socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-        # Cancel discovery to speed up connection
-        BluetoothAdapter.getDefaultAdapter().cancelDiscovery()
         socket.connect()
         print(f"[BT] RFCOMM connected to {device.getName()}")
         return socket
@@ -124,7 +111,7 @@ def write_rnode_config(socket, freq_mhz, bw_khz, sf, cr, tx_power):
         print(f"[BT] write_rnode_config error: {e}")
 
 
-# ── Core ─────────────────────────────────────────────────────────────────────
+#  Core 
 class NanobandCore:
     def __init__(self):
         self.reticulum   = None
@@ -159,10 +146,10 @@ class NanobandCore:
         )
         with open(cfg_file, "w") as f:
             f.write(content)
-        print(f"[CORE] RNS config written → {bt_address}")
+        print(f"[CORE] RNS config written  {bt_address}")
 
-   def start(self, config_path, display_name="Nanoband User",
-              rnode_name="RNode", rnode_mac=None, freq="868.125", bw="125",
+    def start(self, config_path, display_name="Nanoband User",
+              rnode_name="RNode", freq="868.125", bw="125",
               sf="9", cr="6", tx_power=14):
         if not RNS_AVAILABLE:
             print("[CORE] RNS not available")
@@ -180,9 +167,7 @@ class NanobandCore:
 
             # Find + connect RNode
             self.bt_device = get_paired_rnode(rnode_name)
-           self.bt_socket = connect_rnode_bt(self.bt_device, mac=rnode_mac)
-            )
-(self.bt_device)
+            self.bt_socket = connect_rnode_bt(self.bt_device)
 
             if self.bt_socket:
                 write_rnode_config(
@@ -195,7 +180,7 @@ class NanobandCore:
                 )
                 rns_path = os.path.join(config_path, "rns")
             else:
-                print("[CORE] No BT RNode — RNS starting without radio")
+                print("[CORE] No BT RNode  RNS starting without radio")
                 rns_path = config_path
 
             # Start Reticulum
@@ -273,7 +258,7 @@ class NanobandCore:
         return "<not started>"
 
 
-# ── UI helpers ───────────────────────────────────────────────────────────────
+#  UI helpers 
 def styled_btn(text, bg=ACCENT, color=BG, height=44):
     return Button(
         text=text, size_hint_y=None, height=dp(height),
@@ -314,7 +299,7 @@ def compress_image(path, max_px=160, quality=55):
         return None
 
 
-# ── Screens ──────────────────────────────────────────────────────────────────
+#  Screens 
 class MessagesScreen(Screen):
     def __init__(self, app_ref, **kw):
         super().__init__(name="messages", **kw)
@@ -368,7 +353,7 @@ class ContactsScreen(Screen):
         layout = BoxLayout(orientation="vertical", spacing=0,
                            padding=[dp(14), dp(8)])
         layout.add_widget(lbl("CONTACTS", size=12, color=MUTED, bold=True))
-        self.search = styled_input("Search name or hash…")
+        self.search = styled_input("Search name or hash")
         layout.add_widget(self.search)
         self.scroll = ScrollView()
         self.list = BoxLayout(orientation="vertical", size_hint_y=None,
@@ -378,7 +363,7 @@ class ContactsScreen(Screen):
         layout.add_widget(self.scroll)
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         self.name_in = styled_input("Display name")
-        self.hash_in = styled_input("Hash e.g. a1b2c3…")
+        self.hash_in = styled_input("Hash e.g. a1b2c3")
         add_btn = styled_btn("ADD")
         add_btn.bind(on_press=self.add_contact)
         row.add_widget(self.name_in)
@@ -401,7 +386,7 @@ class ContactsScreen(Screen):
         self.list.clear_widgets()
         for h, name in self.app_ref.core.contacts.items():
             btn = Button(
-                text=f"[b]{name}[/b]  [color=556070]{h[:20]}…[/color]",
+                text=f"[b]{name}[/b]  [color=556070]{h[:20]}[/color]",
                 markup=True, size_hint_y=None, height=dp(52),
                 background_normal="", background_color=CARD,
                 color=TEXT, font_size=dp(13)
@@ -426,7 +411,7 @@ class ChatScreen(Screen):
                         padding=[dp(8), 0], spacing=dp(8))
         with hdr.canvas.before:
             Color(*SURFACE); Rectangle(pos=hdr.pos, size=hdr.size)
-        back = styled_btn("‹", bg=SURFACE, color=ACCENT, height=44)
+        back = styled_btn("", bg=SURFACE, color=ACCENT, height=44)
         back.size_hint_x = None
         back.width = dp(40)
         back.bind(on_press=lambda x:
@@ -449,12 +434,12 @@ class ChatScreen(Screen):
                             padding=[dp(8), dp(6)], spacing=dp(6))
         with inp_row.canvas.before:
             Color(*SURFACE); Rectangle(pos=inp_row.pos, size=inp_row.size)
-        self.text_in = styled_input("Type message…", height=40)
+        self.text_in = styled_input("Type message", height=40)
         self.text_in.size_hint_x = 0.75
-        img_btn = styled_btn("📷", bg=CARD, color=TEXT, height=40)
+        img_btn = styled_btn("", bg=CARD, color=TEXT, height=40)
         img_btn.size_hint_x = None
         img_btn.width = dp(42)
-        send_btn = styled_btn("▲", height=40)
+        send_btn = styled_btn("", height=40)
         send_btn.size_hint_x = None
         send_btn.width = dp(42)
         img_btn.bind(on_press=self.pick_image)
@@ -567,7 +552,7 @@ class SettingsScreen(Screen):
 
         s = app_ref.settings
 
-        section("RNODE · BLUETOOTH")
+        section("RNODE  BLUETOOTH")
         self.rnode_name = styled_input("RNode device name e.g. RNode_A3F2")
         self.rnode_name.text = s.get("rnode_name", "")
         row("Paired RNode name", self.rnode_name)
@@ -628,9 +613,9 @@ class SettingsScreen(Screen):
         layout.add_widget(save_btn)
 
         layout.add_widget(lbl(
-            "NANOBAND v0.1  —  LXMF/RNS\n"
+            "NANOBAND v0.1    LXMF/RNS\n"
             "Text + low-res image only\n"
-            "No voice · No calls · No telemetry",
+            "No voice  No calls  No telemetry",
             size=10, color=MUTED
         ))
 
@@ -652,14 +637,13 @@ class SettingsScreen(Screen):
         print("[SETTINGS] Saved")
 
 
-# ── App ───────────────────────────────────────────────────────────────────────
+#  App 
 class NanobandApp(App):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.core = NanobandCore()
         self.settings = {
-            "rnode_name":     "RNode_7EB&",
-            "rnode_mac":      "F0:24:F9:8D:AF:66",
+            "rnode_name":     "RNode_A3F2",
             "freq":           "868.125",
             "bw":             "125",
             "sf":             "9",
@@ -681,7 +665,7 @@ class NanobandApp(App):
         root = BoxLayout(orientation="vertical")
 
         self.status_lbl = Label(
-            text="● NANOBAND  |  Starting…",
+            text=" NANOBAND  |  Starting",
             size_hint_y=None, height=dp(24),
             font_size=dp(10), color=ACCENT, halign="center"
         )
@@ -691,9 +675,9 @@ class NanobandApp(App):
         nav = BoxLayout(size_hint_y=None, height=dp(52))
         with nav.canvas.before:
             Color(*SURFACE); Rectangle(pos=nav.pos, size=nav.size)
-        for name, icon in [("messages", "◈ Msgs"),
-                            ("contacts", "◉ Contacts"),
-                            ("settings", "◎ Settings")]:
+        for name, icon in [("messages", " Msgs"),
+                            ("contacts", " Contacts"),
+                            ("settings", " Settings")]:
             b = Button(
                 text=icon, background_normal="",
                 background_color=SURFACE, color=MUTED,
@@ -721,7 +705,6 @@ class NanobandApp(App):
             config_path=config_dir,
             display_name=s["display_name"],
             rnode_name=s["rnode_name"],
-            rnode_mac=s.get("rnode_mac"),
             freq=s["freq"],
             bw=s["bw"],
             sf=s["sf"],
@@ -731,16 +714,16 @@ class NanobandApp(App):
         def update_status(dt):
             if ok and self.core.bt_socket:
                 self.status_lbl.text = (
-                    f"● NANOBAND  |  BT LINKED  |  {self.core.my_hash[:14]}"
+                    f" NANOBAND  |  BT LINKED  |  {self.core.my_hash[:14]}"
                 )
                 self.status_lbl.color = ACCENT
             elif ok:
                 self.status_lbl.text = (
-                    f"● NANOBAND  |  NO RNODE  |  {self.core.my_hash[:14]}"
+                    f" NANOBAND  |  NO RNODE  |  {self.core.my_hash[:14]}"
                 )
                 self.status_lbl.color = hex("f0a500")
             else:
-                self.status_lbl.text = "○ NANOBAND  |  FAILED TO START"
+                self.status_lbl.text = " NANOBAND  |  FAILED TO START"
                 self.status_lbl.color = DANGER
         Clock.schedule_once(update_status, 0)
 
