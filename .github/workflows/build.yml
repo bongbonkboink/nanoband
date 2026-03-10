@@ -29,7 +29,16 @@ jobs:
             libffi-dev libssl-dev
           pip install buildozer==1.5.0 cython==0.29.37
 
+      - name: Set up Android SDK licenses
+        run: |
+          export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
+          mkdir -p $ANDROID_HOME/licenses
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" > $ANDROID_HOME/licenses/android-sdk-license
+          echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> $ANDROID_HOME/licenses/android-sdk-license
+
       - name: Build APK
+        env:
+          GRADLE_OPTS: "-Xmx2048m"
         run: |
           yes | buildozer android debug 2>&1 | tee build.log
 
