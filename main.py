@@ -65,14 +65,27 @@ def get_paired_rnode(rnode_name):
         print(f"[BT] get_paired_rnode error: {e}")
         return None
 
-
-def connect_rnode_bt(device):
-    if not ANDROID_AVAILABLE or device is None:
+def connect_rnode_bt(device, mac=None):
+    if not ANDROID_AVAILABLE:
         return None
     try:
+        BluetoothAdapter = autoclass('android.bluetooth.BluetoothAdapter')
         UUID = autoclass('java.util.UUID')
         SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+
+        # If no device found by name, try direct MAC connect
+        if device is None and mac:
+            print(f"[BT] Trying direct MAC connect: {mac}")
+            adapter = BluetoothAdapter.getDefaultAdapter()
+            device = adapter.getRemoteDevice(mac)
+
+        if device is None:
+            print("[BT] No device available")
+            return None
+
         socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+        # Cancel discovery to speed up connection
+        BluetoothAdapter.getDefaultAdapter().cancelDiscovery()
         socket.connect()
         print(f"[BT] RFCOMM connected to {device.getName()}")
         return socket
@@ -148,8 +161,8 @@ class NanobandCore:
             f.write(content)
         print(f"[CORE] RNS config written → {bt_address}")
 
-    def start(self, config_path, display_name="Nanoband User",
-              rnode_name="RNode", freq="868.125", bw="125",
+   def start(self, config_path, display_name="Nanoband User",
+              rnode_name="RNode", rnode_mac=None, freq="868.125", bw="125",
               sf="9", cr="6", tx_power=14):
         if not RNS_AVAILABLE:
             print("[CORE] RNS not available")
@@ -167,7 +180,9 @@ class NanobandCore:
 
             # Find + connect RNode
             self.bt_device = get_paired_rnode(rnode_name)
-            self.bt_socket = connect_rnode_bt(self.bt_device)
+           self.bt_socket = connect_rnode_bt(self.bt_device, mac=rnode_mac)
+            )
+(self.bt_device)
 
             if self.bt_socket:
                 write_rnode_config(
@@ -643,7 +658,8 @@ class NanobandApp(App):
         super().__init__(**kw)
         self.core = NanobandCore()
         self.settings = {
-            "rnode_name":     "RNode_A3F2",
+            "rnode_name":     "RNode_7EB&",
+            "rnode_mac":      "F0:24:F9:8D:AF:66",
             "freq":           "868.125",
             "bw":             "125",
             "sf":             "9",
@@ -705,6 +721,7 @@ class NanobandApp(App):
             config_path=config_dir,
             display_name=s["display_name"],
             rnode_name=s["rnode_name"],
+            rnode_mac=s.get("rnode_mac"),
             freq=s["freq"],
             bw=s["bw"],
             sf=s["sf"],
