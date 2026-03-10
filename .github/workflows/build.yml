@@ -15,6 +15,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Pin python-for-android version
+        run: |
+          pip install python-for-android==2023.09.16
+
       - name: Build APK
         run: |
           yes | buildozer android debug 2>&1 | tee build.log
