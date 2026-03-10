@@ -1,4 +1,4 @@
-import os, time, threading
+import os, time, threading, struct
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.boxlayout import BoxLayout
@@ -6,12 +6,12 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
-from kivy.uix.image import Image as KivyImage
+from kivy.uix.spinner import Spinner
 from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.clock import Clock
 from kivy.utils import get_color_from_hex as hex
-from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.graphics import Color, Rectangle
 from PIL import Image as PILImage
 import io, base64
 
@@ -26,7 +26,7 @@ MUTED   = hex("556070")
 TEXT    = hex("d4dce8")
 DANGER  = hex("e05050")
 
-# ── RNS / LXMF bootstrap ────────────────────────────────────────────────────
+# ── RNS / LXMF ──────────────────────────────────────────────────────────────
 try:
     import RNS
     import LXMF
@@ -34,27 +34,167 @@ try:
 except ImportError:
     RNS_AVAILABLE = False
 
+# ── Android BT ──────────────────────────────────────────────────────────────
+try:
+    from jnius import autoclass
+    from android.permissions import request_permissions, Permission
+    ANDROID_AVAILABLE = True
+except ImportError:
+    ANDROID_AVAILABLE = False
+
+
+def get_paired_rnode(rnode_name):
+    if not ANDROID_AVAILABLE:
+        return None
+    try:
+        BluetoothAdapter = autoclass('android.bluetooth.BluetoothAdapter')
+        adapter = BluetoothAdapter.getDefaultAdapter()
+        if adapter is None or not adapter.isEnabled():
+            print("[BT] Bluetooth not enabled")
+            return None
+        paired = adapter.getBondedDevices().toArray()
+        for device in paired:
+            name = device.getName()
+            print(f"[BT] Found paired device: {name}")
+            if rnode_name.lower() in name.lower():
+                print(f"[BT] Matched RNode: {name}")
+                return device
+        print(f"[BT] No device matching '{rnode_name}'")
+        return None
+    except Exception as e:
+        print(f"[BT] get_paired_rnode error: {e}")
+        return None
+
+
+def connect_rnode_bt(device):
+    if not ANDROID_AVAILABLE or device is None:
+        return None
+    try:
+        UUID = autoclass('java.util.UUID')
+        SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+        socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+        socket.connect()
+        print(f"[BT] RFCOMM connected to {device.getName()}")
+        return socket
+    except Exception as e:
+        print(f"[BT] connect error: {e}")
+        return None
+
+
+def write_rnode_config(socket, freq_mhz, bw_khz, sf, cr, tx_power):
+    if socket is None:
+        return
+    try:
+        out = socket.getOutputStream()
+        FEND = 0xC0
+        CMD_FREQUENCY   = 0x01
+        CMD_BANDWIDTH   = 0x02
+        CMD_SF          = 0x03
+        CMD_CR          = 0x04
+        CMD_TXPOWER     = 0x05
+        CMD_RADIO_STATE = 0x06
+
+        def kiss_cmd(cmd, data):
+            frame = bytes([FEND, cmd]) + data + bytes([FEND])
+            out.write(frame)
+
+        freq_hz = int(float(freq_mhz) * 1_000_000)
+        kiss_cmd(CMD_FREQUENCY,   struct.pack(">I", freq_hz))
+        kiss_cmd(CMD_BANDWIDTH,   struct.pack(">I", int(bw_khz) * 1000))
+        kiss_cmd(CMD_SF,          bytes([int(sf)]))
+        kiss_cmd(CMD_CR,          bytes([int(cr)]))
+        kiss_cmd(CMD_TXPOWER,     bytes([int(tx_power)]))
+        kiss_cmd(CMD_RADIO_STATE, bytes([0x01]))
+        out.flush()
+        print("[BT] RNode KISS config sent")
+    except Exception as e:
+        print(f"[BT] write_rnode_config error: {e}")
+
+
+# ── Core ─────────────────────────────────────────────────────────────────────
 class NanobandCore:
     def __init__(self):
         self.reticulum   = None
         self.router      = None
         self.identity    = None
         self.destination = None
+        self.bt_device   = None
+        self.bt_socket   = None
         self.ready       = False
-        self.messages    = {}   # {hash_str: [msg_dict, ...]}
-        self.contacts    = {}   # {hash_str: display_name}
+        self.messages    = {}
+        self.contacts    = {}
 
-    def start(self, config_path, display_name="Nanoband User"):
+    def _write_rns_config(self, config_path, bt_address,
+                           freq, bw, sf, cr, tx_power):
+        os.makedirs(config_path, exist_ok=True)
+        cfg_file = os.path.join(config_path, "config")
+        freq_hz = int(float(freq) * 1_000_000)
+        bw_hz   = int(bw) * 1000
+        content = (
+            "[reticulum]\n"
+            "  enable_transport = False\n"
+            "  share_instance = Yes\n\n"
+            "[interface:RNodeBT]\n"
+            "  type = RNodeInterface\n"
+            "  interface_enabled = True\n"
+            f"  port = {bt_address}\n"
+            f"  frequency = {freq_hz}\n"
+            f"  bandwidth = {bw_hz}\n"
+            f"  txpower = {tx_power}\n"
+            f"  spreadingfactor = {sf}\n"
+            f"  codingrate = {cr}\n"
+        )
+        with open(cfg_file, "w") as f:
+            f.write(content)
+        print(f"[CORE] RNS config written → {bt_address}")
+
+    def start(self, config_path, display_name="Nanoband User",
+              rnode_name="RNode", freq="868.125", bw="125",
+              sf="9", cr="6", tx_power=14):
         if not RNS_AVAILABLE:
+            print("[CORE] RNS not available")
             return False
         try:
-            self.reticulum = RNS.Reticulum(config_path)
+            # Request Android BT permissions
+            if ANDROID_AVAILABLE:
+                request_permissions([
+                    Permission.BLUETOOTH,
+                    Permission.BLUETOOTH_ADMIN,
+                    Permission.BLUETOOTH_CONNECT,
+                    Permission.BLUETOOTH_SCAN,
+                ])
+                time.sleep(1.5)
+
+            # Find + connect RNode
+            self.bt_device = get_paired_rnode(rnode_name)
+            self.bt_socket = connect_rnode_bt(self.bt_device)
+
+            if self.bt_socket:
+                write_rnode_config(
+                    self.bt_socket, freq, bw, sf, cr, tx_power
+                )
+                bt_addr = self.bt_device.getAddress()
+                self._write_rns_config(
+                    os.path.join(config_path, "rns"),
+                    bt_addr, freq, bw, sf, cr, tx_power
+                )
+                rns_path = os.path.join(config_path, "rns")
+            else:
+                print("[CORE] No BT RNode — RNS starting without radio")
+                rns_path = config_path
+
+            # Start Reticulum
+            self.reticulum = RNS.Reticulum(rns_path)
+
+            # Identity
             id_path = os.path.join(config_path, "identity")
             if os.path.exists(id_path):
                 self.identity = RNS.Identity.from_file(id_path)
             else:
                 self.identity = RNS.Identity()
                 self.identity.to_file(id_path)
+
+            # LXMF router
             self.router = LXMF.LXMRouter(
                 storagepath=config_path,
                 identity=self.identity
@@ -65,32 +205,34 @@ class NanobandCore:
             )
             self.router.register_delivery_callback(self._on_receive)
             self.ready = True
+            print("[CORE] Ready")
             return True
+
         except Exception as e:
             print(f"[CORE] Start error: {e}")
             return False
 
     def _on_receive(self, message):
-        sender = RNS.prettyhexrep(message.source_hash)
+        sender  = RNS.prettyhexrep(message.source_hash)
         content = message.content.decode("utf-8", errors="replace")
-        ts = time.time()
         if sender not in self.messages:
             self.messages[sender] = []
         self.messages[sender].append({
             "from": sender, "txt": content,
-            "img": None, "ts": ts
+            "img": None, "ts": time.time()
         })
 
-    def send(self, dest_hash_str, text, img_b64=None):
+    def send(self, dest_hash_str, text):
         if not self.ready:
             return False
         try:
-            dest_hash = bytes.fromhex(dest_hash_str.replace("<","").replace(">","").replace(":",""))
+            clean = dest_hash_str.replace("<","").replace(">","").replace(":","")
+            dest_hash = bytes.fromhex(clean)
             if not RNS.Transport.has_path(dest_hash):
                 RNS.Transport.request_path(dest_hash)
-                timeout = 10
-                while not RNS.Transport.has_path(dest_hash) and timeout > 0:
-                    time.sleep(0.5); timeout -= 0.5
+                t = 10
+                while not RNS.Transport.has_path(dest_hash) and t > 0:
+                    time.sleep(0.5); t -= 0.5
             id_dest = RNS.Identity.recall(dest_hash)
             if id_dest is None:
                 return False
@@ -98,10 +240,10 @@ class NanobandCore:
                 id_dest, RNS.Destination.OUT,
                 RNS.Destination.SINGLE, "lxmf", "delivery"
             )
-            content = text.encode("utf-8")
             msg = LXMF.LXMessage(
                 lxmf_dest, self.destination,
-                content, desired_method=LXMF.LXMessage.DIRECT
+                text.encode("utf-8"),
+                desired_method=LXMF.LXMessage.DIRECT
             )
             self.router.handle_outbound(msg)
             return True
@@ -111,52 +253,49 @@ class NanobandCore:
 
     @property
     def my_hash(self):
-        if self.identity:
+        if self.identity and self.destination:
             return RNS.prettyhexrep(self.destination.hash)
         return "<not started>"
 
 
-# ── UI Helpers ───────────────────────────────────────────────────────────────
+# ── UI helpers ───────────────────────────────────────────────────────────────
 def styled_btn(text, bg=ACCENT, color=BG, height=44):
-    b = Button(
+    return Button(
         text=text, size_hint_y=None, height=dp(height),
         background_normal="", background_color=bg,
         color=color, font_size=dp(13), bold=True
     )
-    return b
 
-def styled_input(hint="", multiline=False, height=40):
-    t = TextInput(
-        hint_text=hint, multiline=multiline,
+def styled_input(hint="", height=40):
+    return TextInput(
+        hint_text=hint, multiline=False,
         size_hint_y=None, height=dp(height),
         background_color=CARD, foreground_color=TEXT,
         hint_text_color=MUTED, cursor_color=ACCENT,
         font_size=dp(13), padding=[dp(10), dp(10)],
     )
-    return t
 
 def lbl(text, size=13, color=TEXT, bold=False):
     return Label(
-        text=text, font_size=dp(size), color=color,
-        bold=bold, size_hint_y=None,
-        height=dp(size * 1.8), halign="left",
-        text_size=(None, None)
+        text=text, font_size=dp(size), color=color, bold=bold,
+        size_hint_y=None, height=dp(size * 1.8),
+        halign="left", text_size=(None, None)
     )
 
 def compress_image(path, max_px=160, quality=55):
     try:
         img = PILImage.open(path).convert("RGB")
-        ratio = min(max_px/img.width, max_px/img.height)
+        ratio = min(max_px / img.width, max_px / img.height)
         if ratio < 1:
             img = img.resize(
-                (int(img.width*ratio), int(img.height*ratio)),
+                (int(img.width * ratio), int(img.height * ratio)),
                 PILImage.LANCZOS
             )
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
         return base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
-        print(f"[IMG] Compress error: {e}")
+        print(f"[IMG] compress error: {e}")
         return None
 
 
@@ -165,24 +304,18 @@ class MessagesScreen(Screen):
     def __init__(self, app_ref, **kw):
         super().__init__(name="messages", **kw)
         self.app_ref = app_ref
-        layout = BoxLayout(orientation="vertical", spacing=0)
-
-        # header
-        hdr = BoxLayout(size_hint_y=None, height=dp(44),
-                        padding=[dp(14),0])
+        layout = BoxLayout(orientation="vertical")
+        hdr = BoxLayout(size_hint_y=None, height=dp(44), padding=[dp(14), 0])
         with hdr.canvas.before:
             Color(*SURFACE); Rectangle(pos=hdr.pos, size=hdr.size)
         hdr.add_widget(lbl("MESSAGES", size=12, color=MUTED, bold=True))
         layout.add_widget(hdr)
-
-        # list
         self.scroll = ScrollView()
-        self.list   = BoxLayout(orientation="vertical", size_hint_y=None,
-                                spacing=1, padding=[0, dp(4)])
+        self.list = BoxLayout(orientation="vertical", size_hint_y=None,
+                              spacing=1, padding=[0, dp(4)])
         self.list.bind(minimum_height=self.list.setter("height"))
         self.scroll.add_widget(self.list)
         layout.add_widget(self.scroll)
-
         self.add_widget(layout)
         self.refresh()
 
@@ -192,12 +325,13 @@ class MessagesScreen(Screen):
         messages = self.app_ref.core.messages
         if not messages:
             self.list.add_widget(lbl(
-                "No conversations yet.\nGo to Contacts to start.",
+                "No conversations yet. Go to Contacts.",
                 color=MUTED, size=12
             ))
             return
         for h, msgs in messages.items():
-            if not msgs: continue
+            if not msgs:
+                continue
             last = msgs[-1]
             name = contacts.get(h, h[:16])
             btn = Button(
@@ -219,17 +353,14 @@ class ContactsScreen(Screen):
         layout = BoxLayout(orientation="vertical", spacing=0,
                            padding=[dp(14), dp(8)])
         layout.add_widget(lbl("CONTACTS", size=12, color=MUTED, bold=True))
-
         self.search = styled_input("Search name or hash…")
         layout.add_widget(self.search)
-
         self.scroll = ScrollView()
-        self.list   = BoxLayout(orientation="vertical", size_hint_y=None,
-                                spacing=dp(4))
+        self.list = BoxLayout(orientation="vertical", size_hint_y=None,
+                              spacing=dp(4))
         self.list.bind(minimum_height=self.list.setter("height"))
         self.scroll.add_widget(self.list)
         layout.add_widget(self.scroll)
-
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         self.name_in = styled_input("Display name")
         self.hash_in = styled_input("Hash e.g. a1b2c3…")
@@ -239,13 +370,12 @@ class ContactsScreen(Screen):
         row.add_widget(self.hash_in)
         row.add_widget(add_btn)
         layout.add_widget(row)
-
         self.add_widget(layout)
         self.refresh()
 
     def add_contact(self, *a):
         name = self.name_in.text.strip()
-        h    = self.hash_in.text.strip().lower().replace(" ","")
+        h = self.hash_in.text.strip().lower().replace(" ", "")
         if name and h:
             self.app_ref.core.contacts[h] = name
             self.name_in.text = ""
@@ -261,18 +391,19 @@ class ContactsScreen(Screen):
                 background_normal="", background_color=CARD,
                 color=TEXT, font_size=dp(13)
             )
-            btn.bind(on_press=lambda x, h=h, n=name:
-                (self.app_ref.open_chat(h, n),
-                 setattr(self.app_ref.sm, "current", "messages")))
+            btn.bind(on_press=lambda x, h=h, n=name: (
+                self.app_ref.open_chat(h, n),
+                setattr(self.app_ref.sm, "current", "messages")
+            ))
             self.list.add_widget(btn)
 
 
 class ChatScreen(Screen):
     def __init__(self, app_ref, **kw):
         super().__init__(name="chat", **kw)
-        self.app_ref     = app_ref
-        self.dest_hash   = None
-        self.dest_name   = ""
+        self.app_ref   = app_ref
+        self.dest_hash = None
+        self.dest_name = ""
         layout = BoxLayout(orientation="vertical")
 
         # header
@@ -290,11 +421,10 @@ class ChatScreen(Screen):
         hdr.add_widget(self.title_lbl)
         layout.add_widget(hdr)
 
-        # messages
+        # message list
         self.scroll = ScrollView()
-        self.msg_list = BoxLayout(orientation="vertical",
-                                  size_hint_y=None, spacing=dp(6),
-                                  padding=[dp(12), dp(8)])
+        self.msg_list = BoxLayout(orientation="vertical", size_hint_y=None,
+                                  spacing=dp(6), padding=[dp(12), dp(8)])
         self.msg_list.bind(minimum_height=self.msg_list.setter("height"))
         self.scroll.add_widget(self.msg_list)
         layout.add_widget(self.scroll)
@@ -306,8 +436,8 @@ class ChatScreen(Screen):
             Color(*SURFACE); Rectangle(pos=inp_row.pos, size=inp_row.size)
         self.text_in = styled_input("Type message…", height=40)
         self.text_in.size_hint_x = 0.75
-        img_btn  = styled_btn("📷", bg=CARD, color=TEXT, height=40)
-        img_btn.size_hint_x  = None
+        img_btn = styled_btn("📷", bg=CARD, color=TEXT, height=40)
+        img_btn.size_hint_x = None
         img_btn.width = dp(42)
         send_btn = styled_btn("▲", height=40)
         send_btn.size_hint_x = None
@@ -318,7 +448,6 @@ class ChatScreen(Screen):
         inp_row.add_widget(img_btn)
         inp_row.add_widget(send_btn)
         layout.add_widget(inp_row)
-
         self.add_widget(layout)
 
     def load(self, dest_hash, dest_name):
@@ -332,11 +461,11 @@ class ChatScreen(Screen):
         msgs = self.app_ref.core.messages.get(self.dest_hash, [])
         for m in msgs:
             is_me = m["from"] == "me"
-            align_box = BoxLayout(size_hint_y=None, height=dp(48))
+            row = BoxLayout(size_hint_y=None, height=dp(48))
             if is_me:
-                align_box.add_widget(Label(size_hint_x=0.25))
+                row.add_widget(Label(size_hint_x=0.25))
             bubble = Button(
-                text=m.get("txt","[image]"),
+                text=m.get("txt", "[image]"),
                 size_hint_x=0.75, size_hint_y=None, height=dp(48),
                 background_normal="",
                 background_color=hex("00b87a33") if is_me else CARD,
@@ -344,21 +473,22 @@ class ChatScreen(Screen):
                 halign="right" if is_me else "left",
                 text_size=(Window.width * 0.65, None)
             )
-            align_box.add_widget(bubble)
+            row.add_widget(bubble)
             if not is_me:
-                align_box.add_widget(Label(size_hint_x=0.25))
-            self.msg_list.add_widget(align_box)
-        Clock.schedule_once(lambda dt:
-            setattr(self.scroll, "scroll_y", 0), 0.1)
+                row.add_widget(Label(size_hint_x=0.25))
+            self.msg_list.add_widget(row)
+        Clock.schedule_once(
+            lambda dt: setattr(self.scroll, "scroll_y", 0), 0.1)
 
     def send_msg(self, *a):
         txt = self.text_in.text.strip()
-        if not txt: return
+        if not txt:
+            return
         core = self.app_ref.core
         if self.dest_hash not in core.messages:
             core.messages[self.dest_hash] = []
         core.messages[self.dest_hash].append({
-            "from":"me", "txt":txt, "img":None, "ts":time.time()
+            "from": "me", "txt": txt, "img": None, "ts": time.time()
         })
         threading.Thread(
             target=core.send, args=(self.dest_hash, txt), daemon=True
@@ -367,7 +497,6 @@ class ChatScreen(Screen):
         self.refresh()
 
     def pick_image(self, *a):
-        # On Android, use camera intent via plyer
         try:
             from plyer import camera
             camera.take_picture(
@@ -379,23 +508,26 @@ class ChatScreen(Screen):
             print(f"[CAM] {e}")
 
     def on_image_captured(self, path):
-        if not path or not os.path.exists(path): return
-        settings = self.app_ref.settings
+        if not path or not os.path.exists(path):
+            return
+        s = self.app_ref.settings
         b64 = compress_image(
             path,
-            max_px=settings.get("img_max_px", 160),
-            quality=settings.get("img_quality", 55)
+            max_px=s.get("img_max_px", 160),
+            quality=s.get("img_quality", 55)
         )
-        if not b64: return
+        if not b64:
+            return
         core = self.app_ref.core
         if self.dest_hash not in core.messages:
             core.messages[self.dest_hash] = []
         core.messages[self.dest_hash].append({
-            "from":"me", "txt":"[image]", "img":b64, "ts":time.time()
+            "from": "me", "txt": "[image]", "img": b64, "ts": time.time()
         })
         threading.Thread(
             target=core.send,
-            args=(self.dest_hash, f"[IMG]{b64}"), daemon=True
+            args=(self.dest_hash, f"[IMG]{b64}"),
+            daemon=True
         ).start()
         self.refresh()
 
@@ -421,48 +553,49 @@ class SettingsScreen(Screen):
         s = app_ref.settings
 
         section("RNODE · BLUETOOTH")
-        self.rnode_name = styled_input("RNode device name", height=40)
-        self.rnode_name.text = s.get("rnode_name","")
-        row("Paired RNode", self.rnode_name)
+        self.rnode_name = styled_input("RNode device name e.g. RNode_A3F2")
+        self.rnode_name.text = s.get("rnode_name", "")
+        row("Paired RNode name", self.rnode_name)
 
         section("RADIO PARAMETERS")
-        self.freq = styled_input("e.g. 868.125", height=40)
-        self.freq.text = s.get("freq","868.125")
+        self.freq = styled_input("e.g. 868.125")
+        self.freq.text = s.get("freq", "868.125")
         row("Frequency (MHz)", self.freq)
 
-        from kivy.uix.spinner import Spinner
-        self.bw = Spinner(
-            text=s.get("bw","125"),
-            values=["125","250","500"],
-            size_hint_y=None, height=dp(40),
-            background_color=CARD, color=TEXT
-        )
+        self.bw = Spinner(text=s.get("bw", "125"),
+                          values=["125", "250", "500"],
+                          size_hint_y=None, height=dp(40),
+                          background_color=CARD, color=TEXT)
         row("Bandwidth (kHz)", self.bw)
 
-        self.sf = Spinner(
-            text=s.get("sf","9"),
-            values=[str(n) for n in range(7,13)],
-            size_hint_y=None, height=dp(40),
-            background_color=CARD, color=TEXT
-        )
+        self.sf = Spinner(text=s.get("sf", "9"),
+                          values=[str(n) for n in range(7, 13)],
+                          size_hint_y=None, height=dp(40),
+                          background_color=CARD, color=TEXT)
         row("Spreading Factor", self.sf)
 
-        self.txpower = styled_input("1-22", height=40)
-        self.txpower.text = str(s.get("tx_power",14))
+        self.cr = Spinner(text=s.get("cr", "6"),
+                          values=["5", "6", "7", "8"],
+                          size_hint_y=None, height=dp(40),
+                          background_color=CARD, color=TEXT)
+        row("Coding Rate (4/x)", self.cr)
+
+        self.txpower = styled_input("1-22")
+        self.txpower.text = str(s.get("tx_power", 14))
         row("TX Power (dBm)", self.txpower)
 
         section("IMAGE TRANSFER")
-        self.img_px = styled_input("pixels", height=40)
-        self.img_px.text = str(s.get("img_max_px",160))
-        row("Max image width", self.img_px)
+        self.img_px = styled_input("pixels")
+        self.img_px.text = str(s.get("img_max_px", 160))
+        row("Max image width (px)", self.img_px)
 
-        self.img_q = styled_input("20-80", height=40)
-        self.img_q.text = str(s.get("img_quality",55))
+        self.img_q = styled_input("20-80")
+        self.img_q.text = str(s.get("img_quality", 55))
         row("JPEG quality (%)", self.img_q)
 
         section("IDENTITY")
-        self.disp_name = styled_input("Your display name", height=40)
-        self.disp_name.text = s.get("display_name","Field Unit")
+        self.disp_name = styled_input("Your display name")
+        self.disp_name.text = s.get("display_name", "Field Unit")
         row("Display name", self.disp_name)
 
         layout.add_widget(lbl(
@@ -471,8 +604,8 @@ class SettingsScreen(Screen):
         ))
 
         section("RETICULUM NETWORK")
-        self.prop_hash = styled_input("Propagation node hash", height=40)
-        self.prop_hash.text = s.get("prop_node_hash","")
+        self.prop_hash = styled_input("Propagation node hash")
+        self.prop_hash.text = s.get("prop_node_hash", "")
         row("Prop node hash", self.prop_hash)
 
         save_btn = styled_btn("SAVE SETTINGS")
@@ -480,7 +613,9 @@ class SettingsScreen(Screen):
         layout.add_widget(save_btn)
 
         layout.add_widget(lbl(
-            "NANOBAND v0.1\nLXMF · Text + low-res image\nNo voice · No telemetry",
+            "NANOBAND v0.1  —  LXMF/RNS\n"
+            "Text + low-res image only\n"
+            "No voice · No calls · No telemetry",
             size=10, color=MUTED
         ))
 
@@ -489,15 +624,17 @@ class SettingsScreen(Screen):
 
     def save(self, *a):
         s = self.app_ref.settings
-        s["rnode_name"]    = self.rnode_name.text.strip()
-        s["freq"]          = self.freq.text.strip()
-        s["bw"]            = self.bw.text
-        s["sf"]            = self.sf.text
-        s["tx_power"]      = int(self.txpower.text.strip() or 14)
-        s["img_max_px"]    = int(self.img_px.text.strip() or 160)
-        s["img_quality"]   = int(self.img_q.text.strip() or 55)
-        s["display_name"]  = self.disp_name.text.strip()
-        s["prop_node_hash"]= self.prop_hash.text.strip()
+        s["rnode_name"]     = self.rnode_name.text.strip()
+        s["freq"]           = self.freq.text.strip()
+        s["bw"]             = self.bw.text
+        s["sf"]             = self.sf.text
+        s["cr"]             = self.cr.text
+        s["tx_power"]       = int(self.txpower.text.strip() or 14)
+        s["img_max_px"]     = int(self.img_px.text.strip() or 160)
+        s["img_quality"]    = int(self.img_q.text.strip() or 55)
+        s["display_name"]   = self.disp_name.text.strip()
+        s["prop_node_hash"] = self.prop_hash.text.strip()
+        print("[SETTINGS] Saved")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -506,15 +643,16 @@ class NanobandApp(App):
         super().__init__(**kw)
         self.core = NanobandCore()
         self.settings = {
-            "rnode_name":    "RNode_A3F2",
-            "freq":          "868.125",
-            "bw":            "125",
-            "sf":            "9",
-            "tx_power":      14,
-            "img_max_px":    160,
-            "img_quality":   55,
-            "display_name":  "Field Unit",
-            "prop_node_hash":"",
+            "rnode_name":     "RNode_A3F2",
+            "freq":           "868.125",
+            "bw":             "125",
+            "sf":             "9",
+            "cr":             "6",
+            "tx_power":       14,
+            "img_max_px":     160,
+            "img_quality":    55,
+            "display_name":   "Field Unit",
+            "prop_node_hash": "",
         }
 
     def build(self):
@@ -526,23 +664,20 @@ class NanobandApp(App):
 
         root = BoxLayout(orientation="vertical")
 
-        # status bar
-        self.status_bar = Label(
-            text="● NANOBAND  |  LXMF/RNS",
+        self.status_lbl = Label(
+            text="● NANOBAND  |  Starting…",
             size_hint_y=None, height=dp(24),
-            font_size=dp(10), color=ACCENT,
-            halign="center"
+            font_size=dp(10), color=ACCENT, halign="center"
         )
-        root.add_widget(self.status_bar)
+        root.add_widget(self.status_lbl)
         root.add_widget(self.sm)
 
-        # bottom nav
         nav = BoxLayout(size_hint_y=None, height=dp(52))
         with nav.canvas.before:
             Color(*SURFACE); Rectangle(pos=nav.pos, size=nav.size)
-        for name, icon in [("messages","◈ Msgs"),
-                            ("contacts","◉ Contacts"),
-                            ("settings","◎ Settings")]:
+        for name, icon in [("messages", "◈ Msgs"),
+                            ("contacts", "◉ Contacts"),
+                            ("settings", "◎ Settings")]:
             b = Button(
                 text=icon, background_normal="",
                 background_color=SURFACE, color=MUTED,
@@ -553,16 +688,44 @@ class NanobandApp(App):
             nav.add_widget(b)
         root.add_widget(nav)
 
-        # start RNS in background
-        config_dir = os.path.join(self.user_data_dir, "rns_config")
+        config_dir = os.path.join(self.user_data_dir, "nanoband")
         os.makedirs(config_dir, exist_ok=True)
+
         threading.Thread(
-            target=self.core.start,
-            args=(config_dir, self.settings["display_name"]),
+            target=self._start_core,
+            args=(config_dir,),
             daemon=True
         ).start()
 
         return root
+
+    def _start_core(self, config_dir):
+        s = self.settings
+        ok = self.core.start(
+            config_path=config_dir,
+            display_name=s["display_name"],
+            rnode_name=s["rnode_name"],
+            freq=s["freq"],
+            bw=s["bw"],
+            sf=s["sf"],
+            cr=s["cr"],
+            tx_power=s["tx_power"],
+        )
+        def update_status(dt):
+            if ok and self.core.bt_socket:
+                self.status_lbl.text = (
+                    f"● NANOBAND  |  BT LINKED  |  {self.core.my_hash[:14]}"
+                )
+                self.status_lbl.color = ACCENT
+            elif ok:
+                self.status_lbl.text = (
+                    f"● NANOBAND  |  NO RNODE  |  {self.core.my_hash[:14]}"
+                )
+                self.status_lbl.color = hex("f0a500")
+            else:
+                self.status_lbl.text = "○ NANOBAND  |  FAILED TO START"
+                self.status_lbl.color = DANGER
+        Clock.schedule_once(update_status, 0)
 
     def open_chat(self, dest_hash, dest_name):
         chat = self.sm.get_screen("chat")
